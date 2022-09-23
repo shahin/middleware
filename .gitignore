@@ -164,3 +164,6 @@ cython_debug/
 
 # mac
 .DS_Store
+
+# data
+data
