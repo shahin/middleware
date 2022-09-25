@@ -1,0 +1,17 @@
+[tool.poetry]
+name = "predictions"
+version = "0.1.0"
+description = "Tools for handling vehicle predictions data."
+authors = ["Shahin Saneinejad <shahin.saneinejad@sfmta.com>"]
+readme = "README.md"
+packages = [{include = "sfmta"}]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+argh = "^0.26.2"
+requests = "^2.28.1"
+
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
