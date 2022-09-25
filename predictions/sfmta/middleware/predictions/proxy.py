@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
 import csv
 from datetime import datetime
+from email.utils import parsedate_to_datetime
 import json
 import os
 import sys
@@ -13,47 +14,64 @@ import requests
 
 URL_TMPL = "https://mw-test-transit-pavnextbusproxy-apim.azure-api.net/service/publicXMLFeed?command=predictions&a=sf-muni&stopId={stop_code}"
 
-fields = {
-    'agency_id': lambda preds, pred: preds['agency']['id'],
-    'response_date': lambda preds, pred: datetime.fromtimestamp(preds['serverTimestamp'] / 1000.0).strftime("%Y%m%d"),
-    'response_time': lambda preds, pred: datetime.fromtimestamp(preds['serverTimestamp'] / 1000.0).strftime("%H:%M:%S"),
-    'stop_code': lambda preds, pred: preds['stop']['code'],
-    'stop_name': lambda preds, pred: preds['stop']['name'],
-    'route_id': lambda preds, pred: preds['route']['id'],
+fields = [
+    'agency_id',
+    'request_date',
+    'request_time',
+    'request_timezone',
+    'response_date',
+    'response_time',
+    'response_timezone',
+    'response_duration',
 
-    'arrival_minutes': lambda preds, pred: pred['minutes'],
-    'arrival_timestamp': lambda preds, pred: pred['timestamp'],
-    'arrival_seconds': None,
-    'direction_id': lambda preds, pred: pred['direction']['id'],
-    'direction_name': lambda preds, pred: pred['direction']['name'],
-    'trip_id': lambda preds, pred: pred['tripId'],
-    'vehicle_id': lambda preds, pred: pred['vehicleId'],
-    'block': None,
-}
+    'stop_code',
+    'stop_name',
+    'route_id',
+
+    'arrival_seconds',
+    'arrival_minutes',
+    'arrival_epoch',
+
+    'direction_id',
+    'direction_name',
+    'trip_id',
+    'vehicle_id',
+
+    'block',
+]
 
 @argh.arg('stop_code', help='The stop code to request predictions for, e.g. 15419')
 @argh.arg('--every-n-seconds', '-e', help='Request predictions every N seconds')
 @argh.arg('--response-data-path', help='Name of the file to write raw response data to')
-@argh.arg('--start-at', help='Time to start at, in YYYYmmddTHHMMSS format')
+@argh.arg('--start-at', help='Time to start at, in rfc-3339 format e.g. 2022-09-25 15:17:34-07:00')
 def main(stop_code: str, every_n_seconds: int = 60.0, response_data_path: str = None, start_at: str = None):
     url = URL_TMPL.format(stop_code=stop_code)
 
     writer = csv.writer(sys.stdout, dialect='excel')
-    writer.writerow([header.replace('_', ' ') for header in fields.keys()])
+    writer.writerow([header.replace('_', ' ') for header in fields])
 
     if response_data_path is None:
         response_data_path = f"responses_{datetime.now().strftime('%Y%m%dT%H%M%S')}_proxy.xml"
     raw_f = open(response_data_path, 'w')
 
-    now = datetime.now()
-    start_at_date = now
+    # use the time zone of the given start datetime, if given
+    # otherwise, default to the local timezone of this process
+    start_at_date = None
     if start_at is not None:
-        start_at_date = datetime.strptime(start_at, "%Y%m%dT%H%M%S")
+        start_at_date = datetime.fromisoformat(start_at)
+    timezone = datetime.now().astimezone().tzinfo if start_at_date is None else start_at_date.tzinfo
+    now = datetime.now(tz=timezone)
+    start_at_date = now if start_at_date is None else start_at_date
 
-    time.sleep((start_at_date-now).total_seconds())
+    time.sleep((start_at_date - now).total_seconds())
 
     while True:
+        now = datetime.now(tz=timezone)
         resp = requests.get(url)
+
+        if not resp.ok:
+            print(json.dumps({'status_code': resp.status_code, 'url': resp.url, 'errorMessage': resp.errorMessage, 'reason': resp.reason, 'elapsed': resp.elapsed.total_seconds()}), file=sys.stderr)
+
         raw_f.write(resp.text)
         raw_f.flush()
 
@@ -73,25 +91,30 @@ def main(stop_code: str, every_n_seconds: int = 60.0, response_data_path: str = 
 
             if tag.tag == 'prediction':
                 _prediction = {k: v for k, v in tag.items()}
-                response_datetime = datetime.strptime(resp.headers['Date'], "%a, %d %b %Y %H:%M:%S %Z")
+                response_datetime = parsedate_to_datetime(resp.headers['Date'])
+                prediction['request_date'] = now.strftime("%Y%m%d")
+                prediction['request_time'] = now.strftime("%H:%M:%S")
+                prediction['request_timezone'] = now.tzname()
                 prediction['response_date'] = response_datetime.strftime("%Y%m%d") 
                 prediction['response_time'] = response_datetime.strftime("%H:%M:%S")
+                prediction['response_timezone'] = response_datetime.tzname()
+                prediction['response_duration'] = resp.elapsed.total_seconds()
                 prediction['agency_id'] = 'sfmta-cis'
                 prediction['stop_code'] = stop_code
-                prediction['arrival_minutes'] = _prediction['minutes']
-                prediction['arrival_timestamp'] = _prediction['epochTime']
                 prediction['arrival_seconds'] = _prediction['seconds']
+                prediction['arrival_minutes'] = _prediction['minutes']
+                prediction['arrival_epoch'] = _prediction['epochTime']
                 prediction['direction_id'] = _prediction['dirTag']
                 prediction['trip_id'] = _prediction['tripTag']
                 prediction['vehicle_id'] = _prediction['vehicle']
                 prediction['block'] = _prediction['block']
 
-                prediction = {k: prediction[k] for k in fields.keys()}
+                prediction = {k: prediction[k] for k in fields}
 
                 writer.writerow(prediction.values())
                 sys.stdout.flush()
 
-        time.sleep(every_n_seconds - ((datetime.now() - start_at_date).total_seconds() % every_n_seconds))
+        time.sleep(every_n_seconds - ((datetime.now(tz=timezone) - start_at_date).total_seconds() % every_n_seconds))
 
 
 if __name__ == '__main__':
